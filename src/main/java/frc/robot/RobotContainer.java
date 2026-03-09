@@ -157,11 +157,66 @@ public class RobotContainer {
     public RobotContainer() {
         configureBindings();
         configureLimelightStream();
+        publishTunableDefaults();
         SmartDashboard.putData("Field", field2d);
         DriverStation.reportWarning(
             "[AUTO] PathPlanner configured: " + drivetrain.isAutoBuilderConfigured(),
             false
         );
+    }
+
+    private void publishTunableDefaults() {
+        SmartDashboard.putNumber("Tune/Ideal Distance (m)", kIdealShootingDistanceMeters);
+        SmartDashboard.putNumber("Tune/Shooter A", kShooterDistA);
+        SmartDashboard.putNumber("Tune/Shooter B", kShooterDistB);
+        SmartDashboard.putNumber("Tune/Aim Kp", kAimToHubKp);
+        SmartDashboard.putNumber("Tune/Range Kp", kRangeKp);
+
+        SmartDashboard.putString("Tune/Step 1 - First Boot",
+            "Power on robot. Open SmartDashboard or Shuffleboard. "
+            + "Check that 'Vision Valid' shows TRUE (Limelight sees AprilTags). "
+            + "Check that 'Hub Distance (m)' shows a reasonable number. "
+            + "If Vision Valid stays FALSE: check Limelight is on, pipeline is set to AprilTag mode, "
+            + "and camera offsets are configured in http://limelight-back.local:5801");
+
+        SmartDashboard.putString("Tune/Step 2 - Test Auto-Aim",
+            "Face the robot toward the hub. Hold Y button. "
+            + "The robot should rotate to point its front at the hub. "
+            + "Watch 'Aim Error (deg)' -- it should drop toward 0. "
+            + "If the robot WOBBLES back and forth: lower 'Aim Kp' (try 2.0, then 1.5). "
+            + "If it turns TOO SLOWLY: raise 'Aim Kp' (try 4.0, then 5.0). "
+            + "When 'Aimed' shows TRUE, the robot is locked on.");
+
+        SmartDashboard.putString("Tune/Step 3 - Test Auto-Drive",
+            "Hold Y button from ~5 meters away. The robot will auto-drive toward the hub "
+            + "and stop at 'Ideal Distance' (default 2.5m). "
+            + "Watch '3D Target Range Err (m)' -- it should go to 0. "
+            + "Watch '3D Target In Range' -- it should turn TRUE when parked. "
+            + "If the robot OVERSHOOTS and goes back and forth: lower 'Range Kp' (try 1.0, then 0.7). "
+            + "While holding Y, your left stick lets you orbit/strafe around the hub.");
+
+        SmartDashboard.putString("Tune/Step 4 - Find Ideal Distance",
+            "Drive manually to 1.5m from hub. Hold RT to shoot. Feed 5 balls. Count scores. "
+            + "Repeat at 2.0m, 2.5m, 3.0m, 3.5m, 4.0m. "
+            + "Set 'Ideal Distance (m)' to whichever distance scored the most balls. "
+            + "This is where the robot will auto-park when you hold Y.");
+
+        SmartDashboard.putString("Tune/Step 5 - Tune Shooter Speed",
+            "Formula: shooter power = A + B * sqrt(distance). "
+            + "Stand at your ideal distance. Hold RT. If balls fall SHORT of hub: increase 'Shooter B' by 0.02. "
+            + "If balls fly OVER the hub: decrease 'Shooter B' by 0.02. "
+            + "Then test at 1m closer and 1m farther to verify. "
+            + "'Shooter A' is the base power (raise if close-range shots are too weak). "
+            + "'Auto Shooter %' on the dashboard shows the current calculated power.");
+
+        SmartDashboard.putString("Tune/Step 6 - Match Ready",
+            "Once tuned, tell your programmer the final values for: "
+            + "Ideal Distance, Shooter A, Shooter B, Aim Kp, Range Kp. "
+            + "They will update the code defaults so these survive a reboot. "
+            + "ALL changes on this dashboard take effect IMMEDIATELY -- no redeploy needed. "
+            + "CONTROLS: Y = auto-aim + auto-drive to hub | X = align to hub tag | "
+            + "RT = shoot (auto-speed) | RT + D-Right = full power shot | "
+            + "LT = intake | RB = feeder | LB = feeder reverse | D-Up/Down = arm");
     }
 
     private void configureLimelightStream() {
@@ -508,10 +563,13 @@ public class RobotContainer {
         final double uy = dy / dist;
 
         // --- Radial: close the range error ---
-        final double rangeError = dist - kIdealShootingDistanceMeters;
+        final double idealDist = SmartDashboard.getNumber("Tune/Ideal Distance (m)", kIdealShootingDistanceMeters);
+        final double rangeKp = SmartDashboard.getNumber("Tune/Range Kp", kRangeKp);
+
+        final double rangeError = dist - idealDist;
         double radialSpeed = 0.0;
         if (Math.abs(rangeError) > kRangeDistDeadbandMeters) {
-            radialSpeed = MathUtil.clamp(rangeError * kRangeKp,
+            radialSpeed = MathUtil.clamp(rangeError * rangeKp,
                 -kMaxRangeSpeedMps, kMaxRangeSpeedMps);
         }
 
@@ -743,8 +801,12 @@ public class RobotContainer {
         if (!hadVisionPose) {
             return kShooterPercentOutput;
         }
-        final double raw = kShooterDistA + kShooterDistB * Math.sqrt(Math.max(0, lastDistanceToHubMeters));
-        return Math.max(kShooterDistMinOutput, Math.min(kShooterDistMaxOutput, raw));
+        final double a = SmartDashboard.getNumber("Tune/Shooter A", kShooterDistA);
+        final double b = SmartDashboard.getNumber("Tune/Shooter B", kShooterDistB);
+        final double min = SmartDashboard.getNumber("Tune/Shooter Min %", kShooterDistMinOutput);
+        final double max = SmartDashboard.getNumber("Tune/Shooter Max %", kShooterDistMaxOutput);
+        final double raw = a + b * Math.sqrt(Math.max(0, lastDistanceToHubMeters));
+        return Math.max(min, Math.min(max, raw));
     }
 
     private double computeAimToHubTurnRate() {
@@ -752,6 +814,8 @@ public class RobotContainer {
             DriverStation.reportWarning("[AIM] No vision data yet, aim-to-hub disabled", false);
             return 0.0;
         }
+
+        final double aimKp = SmartDashboard.getNumber("Tune/Aim Kp", kAimToHubKp);
 
         final Pose2d currentPose = drivetrain.getState().Pose;
         final Translation2d hubPos = getAllianceHubPosition();
@@ -766,7 +830,7 @@ public class RobotContainer {
             return 0.0;
         }
 
-        final double rawTurnRate = kAimToHubKp * errorRad;
+        final double rawTurnRate = aimKp * errorRad;
         return Math.max(-kAimToHubMaxTurnRateRadPerSec, Math.min(kAimToHubMaxTurnRateRadPerSec, rawTurnRate));
     }
 
