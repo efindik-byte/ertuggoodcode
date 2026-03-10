@@ -54,8 +54,9 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private static final double kHalfTrackMeters = 0.3429; // 13.5 inches
 
     private static final String kLimelightName = "limelight-back";
-    private static final double kVisionStdDevX = 0.7;
-    private static final double kVisionStdDevY = 0.7;
+    private static final double kVisionBaseStdDev = 0.3;
+    private static final double kVisionDistExponent = 2.0;
+    private static final double kVisionMaxStdDev = 5.0;
     private static final double kMaxGyroRateForVisionDps = 360.0;
 
     private Notifier m_simNotifier = null;
@@ -336,8 +337,22 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             return;
         }
 
-        setVisionMeasurementStdDevs(VecBuilder.fill(kVisionStdDevX, kVisionStdDevY, 9999999));
+        final double xyStdDev = computeVisionStdDev(mt2.avgTagDist, mt2.tagCount);
+        setVisionMeasurementStdDevs(VecBuilder.fill(xyStdDev, xyStdDev, 9999999));
         addVisionMeasurement(mt2.pose, mt2.timestampSeconds);
+    }
+
+    /**
+     * Scales vision trust by tag distance and count.
+     * Close tags seen by multiple detections get high trust (low std dev);
+     * distant single-tag readings get low trust (high std dev).
+     */
+    private double computeVisionStdDev(double avgTagDistMeters, int tagCount) {
+        if (tagCount <= 0) return kVisionMaxStdDev;
+        double stdDev = kVisionBaseStdDev
+            * Math.pow(avgTagDistMeters, kVisionDistExponent)
+            / tagCount;
+        return Math.min(stdDev, kVisionMaxStdDev);
     }
 
     private void startSimThread() {

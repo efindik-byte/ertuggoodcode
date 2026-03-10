@@ -6,11 +6,15 @@ package frc.robot;
 
 import static edu.wpi.first.units.Units.*;
 
-import com.ctre.phoenix6.controls.DutyCycleOut;
+import com.ctre.phoenix6.configs.TalonFXConfiguration;
+import com.ctre.phoenix6.controls.NeutralOut;
+import com.ctre.phoenix6.controls.VelocityVoltage;
 import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.swerve.SwerveModule.DriveRequestType;
 import com.ctre.phoenix6.swerve.SwerveRequest;
+import com.pathplanner.lib.auto.AutoBuilder;
 import com.pathplanner.lib.commands.PathPlannerAuto;
+import com.pathplanner.lib.path.PathConstraints;
 import com.revrobotics.spark.SparkLowLevel.MotorType;
 import com.revrobotics.spark.SparkMax;
 
@@ -26,7 +30,11 @@ import edu.wpi.first.networktables.NetworkTable;
 import edu.wpi.first.networktables.NetworkTableInstance;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.DriverStation.Alliance;
+import edu.wpi.first.wpilibj.GenericHID;
 import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.wpilibj.shuffleboard.BuiltInWidgets;
+import edu.wpi.first.wpilibj.shuffleboard.Shuffleboard;
+import edu.wpi.first.wpilibj.shuffleboard.ShuffleboardTab;
 import edu.wpi.first.wpilibj.smartdashboard.Field2d;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
@@ -35,7 +43,9 @@ import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
 import edu.wpi.first.wpilibj2.command.button.RobotModeTriggers;
 import edu.wpi.first.wpilibj2.command.button.Trigger;
 
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import frc.robot.generated.TunerConstants;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
@@ -52,10 +62,11 @@ public class RobotContainer {
     private static final double kFeederReversePercentOutput = 0.6;
     private static final double kShooterPercentOutput = 0.6;
     private static final double kShooterBoostPercentOutput = 0.8; // Hold D-pad Right while shooter is on
-    private static final double kShooterStartPercentOutput = 0.05;
-    private static final double kShooterRampUpDurationSec = 0.5;
-    private static final double kShooterRampDownDurationSec = 0.5;
-    private static final double kShooterRampSettledFraction = 0.99;
+    private static final double kShooterMaxVelocityRps = 80.0; // tune: max useful flywheel speed (rotations/sec)
+    private static final double kShooterKs = 0.15;  // volts to overcome static friction
+    private static final double kShooterKv = 0.12;  // volts per RPS (~12V / 100 RPS for Kraken)
+    private static final double kShooterKp = 0.3;   // volts per RPS of error
+    private static final double kShooterAtSpeedThresholdRps = 3.0;
     private static final double kIntakeArmUpPercentOutput = -0.3;   // counterclockwise
     private static final double kIntakeArmDownPercentOutput = 0.3;  // clockwise
     private static final double kIntakeArmMinRotations = -2.0;     // soft limit (tune on robot)
@@ -81,11 +92,41 @@ public class RobotContainer {
     private static final double kAutoShooterSpinupSec = 1.5;
     private static final double kAutoFeedSec = 5.0;
 
+    // Shift-aware scoring system
+    private static final double kRumblePreActiveSec = 3.0;
+    private static final double kRumbleIntensity = 0.8;
+    private static final double kEstimatedFuelPerSec = 2.0;
+    private static final double kAutoFeedAimThresholdDeg = 5.0;
+
+    // Auto-cycle teleop (button-driven autonomous scoring)
+    // Depot positions derived from alliance wall AprilTag pairs (tags 29/30 blue, 13/14 red).
+    // Robot parks ~1.2m from the wall, centered on the depot opening.
+    private static final Translation2d kBlueDepotPosition = new Translation2d(1.2, 0.88);
+    private static final Translation2d kRedDepotPosition = new Translation2d(15.34, 7.19);
+    private static final double kPathfindMaxVelMps = 3.0;
+    private static final double kPathfindMaxAccelMps2 = 3.0;
+    private static final double kAutoIntakeMaxSec = 4.0;
+    private static final double kAutoScoreMaxSec = 12.0;
+    private static final double kManualOverrideThreshold = 0.3;
+
+    // Smart cycle: current-based detection for hopper empty and collection done
+    private static final double kFeederEmptyCurrentAmps = 4.0;
+    private static final double kFeederEmptyConfirmSec = 0.4;
+    private static final double kMinScoringSec = 2.0;
+    private static final double kIntakeIdleCurrentAmps = 5.0;
+    private static final double kIntakeIdleConfirmSec = 0.5;
+    private static final double kMinCollectSec = 1.0;
+    private static final double kVisionFreshnessTimeoutSec = 2.0;
+    private static final double kAutoCycleTimeoutSec = 120.0;
+    private static final double kFieldMarginMeters = 0.5;
+
     // 2026 REBUILT field dimensions (blue-origin WPILib coordinates, meters)
-    private static final double kFieldLengthMeters = 16.54;
-    private static final double kFieldWidthMeters = 8.07;
-    private static final Translation2d kBlueHubPosition = new Translation2d(4.03, kFieldWidthMeters / 2.0);
-    private static final Translation2d kRedHubPosition = new Translation2d(kFieldLengthMeters - 4.03, kFieldWidthMeters / 2.0);
+    private static final double kFieldLengthMeters = 16.541;
+    private static final double kFieldWidthMeters = 8.069;
+    // Hub centers derived from AprilTag positions (average of all 8 face tags per hub).
+    // The manual's "4.03m" is the BACK FACE distance; the actual center is ~4.63m from the wall.
+    private static final Translation2d kBlueHubPosition = new Translation2d(4.63, 4.03);
+    private static final Translation2d kRedHubPosition = new Translation2d(11.92, 4.03);
 
     // Distance-based shooter speed: dutyCycle = kShooterDistA + kShooterDistB * sqrt(distance)
     private static final double kShooterDistA = 0.35;        // base offset
@@ -131,12 +172,12 @@ public class RobotContainer {
     private final SparkMax feederMotor = new SparkMax(kFeederMotorCanId, MotorType.kBrushed);
     private final SparkMax intakeMotor = new SparkMax(kIntakeMotorCanId, MotorType.kBrushless);
     private final SparkMax intakeArmMotor = new SparkMax(kIntakeArmMotorCanId, MotorType.kBrushless);
-    private final DutyCycleOut shooterRequest = new DutyCycleOut(0);
+    private final VelocityVoltage shooterVelocityRequest = new VelocityVoltage(0).withSlot(0);
+    private final NeutralOut shooterNeutralRequest = new NeutralOut();
     private final NetworkTable limelightTable = NetworkTableInstance.getDefault().getTable(kLimelightTableName);
     private double lastIntakeDiagTimeSec = -1.0;
     private double lastIntakeArmPosLogTimeSec = -1.0;
-    private double shooterAppliedPercent = 0.0;
-    private double lastShooterUpdateTimeSec = Timer.getFPGATimestamp();
+    private double shooterCommandedRps = 0.0;
     private boolean limelightAlignModeLast = false;
     private boolean limelightHadTagLast = false;
     private double lastLimelightDebugTimeSec = -1.0;
@@ -148,17 +189,31 @@ public class RobotContainer {
     private double lastVisionPoseLogTimeSec = -1.0;
     private double lastDistanceToHubMeters = -1.0;
     private boolean hadVisionPose = false;
+    private double lastVisionTagTimeSec = -1.0;
     private boolean aimToHubModeLast = false;
+
+    private int estimatedFuelScored = 0;
+    private double fuelAccumulator = 0.0;
+    private double lastShiftUpdateSec = -1.0;
+
+    private final PathConstraints pathfindConstraints = new PathConstraints(
+        kPathfindMaxVelMps, kPathfindMaxAccelMps2, 2 * Math.PI, 4 * Math.PI);
+    private boolean autoCycleActive = false;
+    private double feederLowCurrentStartSec = -1.0;
+    private double intakeIdleStartSec = -1.0;
+    private double scoringPhaseStartSec = -1.0;
+    private double collectPhaseStartSec = -1.0;
 
     private final Field2d field2d = new Field2d();
 
     public final CommandSwerveDrivetrain drivetrain = TunerConstants.createDrivetrain();
 
     public RobotContainer() {
+        configureShooter();
         configureBindings();
         configureLimelightStream();
         publishTunableDefaults();
-        SmartDashboard.putData("Field", field2d);
+        configureDashboard();
         DriverStation.reportWarning(
             "[AUTO] PathPlanner configured: " + drivetrain.isAutoBuilderConfigured(),
             false
@@ -169,6 +224,9 @@ public class RobotContainer {
         SmartDashboard.putNumber("Tune/Ideal Distance (m)", kIdealShootingDistanceMeters);
         SmartDashboard.putNumber("Tune/Shooter A", kShooterDistA);
         SmartDashboard.putNumber("Tune/Shooter B", kShooterDistB);
+        SmartDashboard.putNumber("Tune/Shooter Max RPS", kShooterMaxVelocityRps);
+        SmartDashboard.putNumber("Tune/Shooter Min %", kShooterDistMinOutput);
+        SmartDashboard.putNumber("Tune/Shooter Max %", kShooterDistMaxOutput);
         SmartDashboard.putNumber("Tune/Aim Kp", kAimToHubKp);
         SmartDashboard.putNumber("Tune/Range Kp", kRangeKp);
 
@@ -202,21 +260,167 @@ public class RobotContainer {
             + "This is where the robot will auto-park when you hold Y.");
 
         SmartDashboard.putString("Tune/Step 5 - Tune Shooter Speed",
-            "Formula: shooter power = A + B * sqrt(distance). "
-            + "Stand at your ideal distance. Hold RT. If balls fall SHORT of hub: increase 'Shooter B' by 0.02. "
-            + "If balls fly OVER the hub: decrease 'Shooter B' by 0.02. "
-            + "Then test at 1m closer and 1m farther to verify. "
-            + "'Shooter A' is the base power (raise if close-range shots are too weak). "
-            + "'Auto Shooter %' on the dashboard shows the current calculated power.");
+            "CLOSED-LOOP: the shooter now holds exact RPM regardless of battery voltage. "
+            + "Formula: target fraction = A + B * sqrt(distance), then velocity = fraction * 'Max RPS'. "
+            + "Stand at your ideal distance. Hold RT. Watch 'Shooter At Speed' -- it should be TRUE. "
+            + "If balls fall SHORT: increase 'Shooter B' by 0.02 or increase 'Max RPS' by 5. "
+            + "If balls fly OVER: decrease 'Shooter B' by 0.02 or decrease 'Max RPS' by 5. "
+            + "Test at 1m closer and 1m farther to verify. "
+            + "'Shooter Target RPS' and 'Shooter Actual RPS' show live velocity. "
+            + "They should match closely -- if Actual lags behind Target, the PID gains (kS/kV/kP in code) need tuning.");
 
         SmartDashboard.putString("Tune/Step 6 - Match Ready",
             "Once tuned, tell your programmer the final values for: "
-            + "Ideal Distance, Shooter A, Shooter B, Aim Kp, Range Kp. "
+            + "Ideal Distance, Shooter A, Shooter B, Shooter Max RPS, Aim Kp, Range Kp. "
             + "They will update the code defaults so these survive a reboot. "
             + "ALL changes on this dashboard take effect IMMEDIATELY -- no redeploy needed. "
-            + "CONTROLS: Y = auto-aim + auto-drive to hub | X = align to hub tag | "
-            + "RT = shoot (auto-speed) | RT + D-Right = full power shot | "
-            + "LT = intake | RB = feeder | LB = feeder reverse | D-Up/Down = arm");
+            + "CONTROLS: Y+RT = AUTO-SCORE (aim+drive+shoot+auto-feed) | Y = auto-aim only | "
+            + "X = align to hub tag | RT = shoot (auto-speed) | RT+D-Right = full power | "
+            + "LT = intake | RB = feeder | LB = feeder reverse | D-Up/Down = arm. "
+            + "DASHBOARD: 'Hub Active' = can you score? | 'Shift Timer' = seconds until next change | "
+            + "'Fuel Scored' = estimated toward RP thresholds (100/360). "
+            + "Controller RUMBLES 3s before your hub goes active -- pre-position!");
+    }
+
+    private void configureDashboard() {
+        // ── MATCH TAB ── Primary view for drive coach during competition
+        ShuffleboardTab match = Shuffleboard.getTab("Match");
+
+        match.addBoolean("HUB ACTIVE", this::isHubActive)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#00FF00", "Color when false", "#FF0000"))
+            .withSize(3, 3).withPosition(0, 0);
+
+        match.addNumber("SHIFT TIMER", this::getSecondsUntilNextShiftChange)
+            .withSize(2, 2).withPosition(3, 0);
+
+        match.addBoolean("Auto-Cycle", () -> autoCycleActive)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#00AAFF", "Color when false", "#333333"))
+            .withSize(2, 1).withPosition(5, 0);
+
+        match.addNumber("Fuel Scored", () -> (double) estimatedFuelScored)
+            .withSize(2, 1).withPosition(7, 0);
+
+        match.addBoolean("Auto-Feed", () ->
+                isAimToHubRequested() && isShooterRequested()
+                && isShooterAtSpeed() && isHubActive())
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withSize(2, 1).withPosition(5, 1);
+
+        match.addNumber("Need for Energized", () -> (double) Math.max(0, 100 - estimatedFuelScored))
+            .withSize(2, 1).withPosition(7, 1);
+
+        match.addBoolean("AIMED", () ->
+                hadVisionPose && Math.abs(computeAimErrorDeg()) < kAimToHubDeadbandDeg)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#00FF00", "Color when false", "#FF4444"))
+            .withSize(2, 1).withPosition(3, 2);
+
+        match.addBoolean("AT SPEED", this::isShooterAtSpeed)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#00FF00", "Color when false", "#FF4444"))
+            .withSize(2, 1).withPosition(5, 2);
+
+        match.addNumber("Need for Supercharged", () -> (double) Math.max(0, 360 - estimatedFuelScored))
+            .withSize(2, 1).withPosition(7, 2);
+
+        match.addBoolean("WARNING: Hub Inactive", () -> !isHubActive() && isShooterRequested())
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#FF0000", "Color when false", "#333333"))
+            .withSize(3, 1).withPosition(0, 3);
+
+        match.addBoolean("Vision OK", () -> hadVisionPose)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withSize(1, 1).withPosition(3, 3);
+
+        match.addBoolean("RP: 100", () -> estimatedFuelScored >= 100)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#FFD700", "Color when false", "#333333"))
+            .withSize(1, 1).withPosition(4, 3);
+
+        match.addBoolean("RP: 360", () -> estimatedFuelScored >= 360)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#FFD700", "Color when false", "#333333"))
+            .withSize(1, 1).withPosition(5, 3);
+
+        match.addNumber("Hub Dist (m)", () -> lastDistanceToHubMeters)
+            .withSize(2, 1).withPosition(6, 3);
+
+        match.addNumber("Aim Error", this::computeAimErrorDeg)
+            .withSize(1, 1).withPosition(8, 3);
+
+        match.addBoolean("SAFE FOR AUTO", this::isSafeForAutoFunctions)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withProperties(Map.of("Color when true", "#00FF00", "Color when false", "#FF0000"))
+            .withSize(2, 1).withPosition(0, 4);
+
+        match.addBoolean("Alliance Set", this::isAllianceKnown)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withSize(1, 1).withPosition(2, 4);
+
+        match.addBoolean("Vision Fresh", this::isVisionFresh)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withSize(1, 1).withPosition(3, 4);
+
+        match.addBoolean("Pose Valid", this::isPoseOnField)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withSize(1, 1).withPosition(4, 4);
+
+        // ── ROBOT TAB ── Detailed robot state + field map
+        ShuffleboardTab robot = Shuffleboard.getTab("Robot");
+
+        robot.add("Field", field2d)
+            .withWidget(BuiltInWidgets.kField)
+            .withSize(5, 3).withPosition(0, 0);
+
+        robot.addNumber("Aim Error (deg)", this::computeAimErrorDeg)
+            .withSize(2, 1).withPosition(5, 0);
+
+        robot.addNumber("Target RPS", () -> shooterCommandedRps)
+            .withSize(2, 1).withPosition(7, 0);
+
+        robot.addNumber("Auto Shooter %", () -> computeDistanceBasedShooterOutput() * 100.0)
+            .withSize(2, 1).withPosition(5, 1);
+
+        robot.addNumber("Actual RPS", () -> shooterMotor.getVelocity().getValueAsDouble())
+            .withSize(2, 1).withPosition(7, 1);
+
+        robot.addNumber("Hub Distance (m)", () -> lastDistanceToHubMeters)
+            .withSize(2, 1).withPosition(5, 2);
+
+        robot.addBoolean("Vision Valid", () -> hadVisionPose)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withSize(2, 1).withPosition(7, 2);
+
+        robot.addString("Alliance", () -> {
+            Optional<Alliance> a = DriverStation.getAlliance();
+            return a.isPresent() ? a.get().name() : "UNKNOWN";
+        }).withSize(2, 1).withPosition(0, 3);
+
+        robot.addBoolean("Hub Active", this::isHubActive)
+            .withWidget(BuiltInWidgets.kBooleanBox)
+            .withSize(2, 1).withPosition(2, 3);
+
+        robot.addNumber("Match Time", DriverStation::getMatchTime)
+            .withSize(2, 1).withPosition(4, 3);
+
+        Shuffleboard.selectTab("Match");
+    }
+
+    private void configureShooter() {
+        TalonFXConfiguration config = new TalonFXConfiguration();
+        config.Slot0.kS = kShooterKs;
+        config.Slot0.kV = kShooterKv;
+        config.Slot0.kP = kShooterKp;
+        config.Slot0.kI = 0;
+        config.Slot0.kD = 0;
+        shooterMotor.getConfigurator().apply(config);
+        DriverStation.reportWarning(
+            String.format("[SHOOTER] Velocity PID configured: kS=%.3f kV=%.3f kP=%.3f maxRPS=%.0f",
+                kShooterKs, kShooterKv, kShooterKp, kShooterMaxVelocityRps),
+            false
+        );
     }
 
     private void configureLimelightStream() {
@@ -244,16 +448,35 @@ public class RobotContainer {
             drivetrain.applyRequest(() -> idleRequest).ignoringDisable(true)
         );
 
+        // Clear controller rumble when disabled.
+        RobotModeTriggers.disabled().onTrue(Commands.runOnce(() -> {
+            driverController.getHID().setRumble(GenericHID.RumbleType.kBothRumble, 0);
+            operatorController.getHID().setRumble(GenericHID.RumbleType.kBothRumble, 0);
+        }).ignoringDisable(true));
+
+        // Reset fuel counter at match start (autonomous init).
+        RobotModeTriggers.autonomous().onTrue(Commands.runOnce(() -> {
+            estimatedFuelScored = 0;
+            fuelAccumulator = 0.0;
+            lastShiftUpdateSec = -1.0;
+        }));
+
         // Controls (same on driver & operator; operator has priority):
+        // - Press A:         AUTO-CYCLE: robot drives to depot, intakes, drives to hub,
+        //                    aims, shoots, repeats. Press A again or B to cancel.
+        //                    Touch sticks to instantly override and take manual control.
         // - Hold LT:         intake
         // - Hold LB:         feeder reverse
-        // - Hold RB:         feeder
+        // - Hold RB:         feeder (manual)
         // - Hold RT:         shooter (auto-speed from distance to hub)
+        // - Hold Y + RT:     AUTO-SCORE: aim + drive to hub + shoot + auto-feed when ready
         // - Hold D-pad Right + RT: shooter boost (full power override)
         // - Hold Y:          3D targeting (auto-aim + auto-drive to ideal range; stick orbits hub)
         // - Hold X:          AprilTag align (hub tags only; ignores non-hub tags)
         // - D-pad Up/Down:   intake arm up/down
         // - Left stick press: reseed field-centric heading
+        // - Press B:         cancel auto-cycle
+        // Dashboard: Hub Active, Shift Timer, Fuel Scored, RP tracking, Auto-Cycle status
         final Trigger intakeTrigger = new Trigger(this::isIntakeRequested);
         final Trigger feederReverseTrigger = new Trigger(this::isFeederReverseRequested);
         final Trigger feederTrigger = new Trigger(this::isFeederRequested);
@@ -283,8 +506,8 @@ public class RobotContainer {
             () -> feederMotor.set(kFeederPercentOutput),
             () -> feederMotor.set(0.0)
         ));
-        feederTrigger.onTrue(Commands.runOnce(() -> logControl("RB detected -> Feeder ON")));
-        feederTrigger.onFalse(Commands.runOnce(() -> logControl("RB released -> Feeder OFF")));
+        feederTrigger.onTrue(Commands.runOnce(() -> logControl("Feeder ON (manual or auto-feed)")));
+        feederTrigger.onFalse(Commands.runOnce(() -> logControl("Feeder OFF")));
 
         feederReverseTrigger.whileTrue(Commands.runEnd(
             () -> feederMotor.set(kFeederReversePercentOutput),
@@ -297,15 +520,18 @@ public class RobotContainer {
         // RT chooses target; D-pad Right overrides to full-power boost.
         RobotModeTriggers.teleop().whileTrue(Commands.run(() -> {
             updateVisionPose();
-            final double targetPercent;
-            if (shooterTrigger.getAsBoolean()) {
-                targetPercent = isShooterBoostRequested()
-                    ? kShooterBoostPercentOutput
-                    : computeDistanceBasedShooterOutput();
-            } else {
-                targetPercent = 0.0;
+            if (!autoCycleActive) {
+                final double targetPercent;
+                if (shooterTrigger.getAsBoolean()) {
+                    targetPercent = isShooterBoostRequested()
+                        ? kShooterBoostPercentOutput
+                        : computeDistanceBasedShooterOutput();
+                } else {
+                    targetPercent = 0.0;
+                }
+                updateShooterOutput(targetPercent);
             }
-            updateShooterOutput(targetPercent);
+            updateShiftAwareTelemetry();
         }));
         shooterTrigger.onTrue(Commands.runOnce(() -> logControl("RT detected -> Shooter ON")));
         shooterTrigger.onFalse(Commands.runOnce(() -> logControl("RT released -> Shooter OFF")));
@@ -332,6 +558,42 @@ public class RobotContainer {
 
         // Debug intake arm position at 500ms cadence in teleop.
         RobotModeTriggers.teleop().whileTrue(Commands.run(this::maybeLogIntakeArmPosition));
+
+        // ── Auto-Cycle: fully autonomous collect→score loop ──
+        // A button: toggle auto-cycle on/off
+        // B button: emergency cancel
+        // Stick override: touching the sticks cancels auto-cycle instantly
+        final Command autoCycle = createAutoCycleCommand();
+        driverController.a().toggleOnTrue(autoCycle);
+        driverController.b().onTrue(Commands.runOnce(() -> {
+            if (autoCycle.isScheduled()) autoCycle.cancel();
+        }));
+        new Trigger(() -> autoCycleActive && hasManualDriveInput())
+            .onTrue(Commands.runOnce(() -> {
+                if (autoCycle.isScheduled()) autoCycle.cancel();
+            }));
+
+        // Cancel auto-cycle if safety conditions fail mid-cycle
+        new Trigger(() -> autoCycleActive && !isSafeForAutoFunctions())
+            .onTrue(Commands.runOnce(() -> {
+                if (autoCycle.isScheduled()) autoCycle.cancel();
+                DriverStation.reportWarning(
+                    "[SAFETY] Auto-cycle cancelled: alliance=" + isAllianceKnown()
+                    + " visionFresh=" + isVisionFresh() + " poseOnField=" + isPoseOnField(), false);
+            }));
+
+        // ── EMERGENCY STOP: START + BACK kills all motors instantly ──
+        new Trigger(() -> driverController.start().getAsBoolean()
+                && driverController.back().getAsBoolean())
+            .onTrue(Commands.runOnce(() -> {
+                shooterMotor.setControl(shooterNeutralRequest);
+                shooterCommandedRps = 0;
+                feederMotor.set(0);
+                intakeMotor.set(0);
+                intakeArmMotor.set(0);
+                if (autoCycle.isScheduled()) autoCycle.cancel();
+                DriverStation.reportWarning("[SAFETY] EMERGENCY STOP: all motors killed", false);
+            }));
 
         drivetrain.registerTelemetry(logger::telemeterize);
     }
@@ -410,25 +672,21 @@ public class RobotContainer {
         ), false);
     }
 
-    private void updateShooterOutput(double targetPercent) {
-        final double nowSec = Timer.getFPGATimestamp();
-        final double dtSec = Math.max(0.0, nowSec - lastShooterUpdateTimeSec);
-        lastShooterUpdateTimeSec = nowSec;
-
-        final double rampDurationSec = targetPercent > shooterAppliedPercent
-            ? kShooterRampUpDurationSec
-            : kShooterRampDownDurationSec;
-        final double tauSec = -rampDurationSec / Math.log(1.0 - kShooterRampSettledFraction);
-        final double alpha = 1.0 - Math.exp(-dtSec / tauSec);
-
-        if (targetPercent > 0.0 && shooterAppliedPercent <= 0.0) {
-            shooterAppliedPercent = Math.min(kShooterStartPercentOutput, targetPercent);
+    private void updateShooterOutput(double targetFraction) {
+        final double maxRps = SmartDashboard.getNumber("Tune/Shooter Max RPS", kShooterMaxVelocityRps);
+        if (targetFraction <= 0.0) {
+            shooterCommandedRps = 0.0;
+            shooterMotor.setControl(shooterNeutralRequest);
+            return;
         }
+        shooterCommandedRps = targetFraction * maxRps;
+        shooterMotor.setControl(shooterVelocityRequest.withVelocity(shooterCommandedRps));
+    }
 
-        shooterAppliedPercent += (targetPercent - shooterAppliedPercent) * alpha;
-        shooterAppliedPercent = Math.max(0.0, Math.min(1.0, shooterAppliedPercent));
-
-        shooterMotor.setControl(shooterRequest.withOutput(shooterAppliedPercent));
+    public boolean isShooterAtSpeed() {
+        if (shooterCommandedRps <= 0.0) return false;
+        final double actualRps = shooterMotor.getVelocity().getValueAsDouble();
+        return Math.abs(actualRps - shooterCommandedRps) < kShooterAtSpeedThresholdRps;
     }
 
     private double getRequestedRotationalRate() {
@@ -497,7 +755,7 @@ public class RobotContainer {
         // 3D targeting: when Y (aim-to-hub) is held AND we have valid vision,
         // auto-drive to the ideal shooting distance. Driver stick perpendicular
         // to the hub direction is preserved so the driver can orbit the hub.
-        if (isAimToHubRequested() && hadVisionPose && lastDistanceToHubMeters > 0) {
+        if (isAimToHubRequested() && isSafeForAutoFunctions() && lastDistanceToHubMeters > 0) {
             final double[] autoVel = computeAutoPositionVelocity();
             final double xVelMps = xVelLimiter.calculate(autoVel[0]);
             final double yVelMps = yVelLimiter.calculate(autoVel[1]);
@@ -585,11 +843,6 @@ public class RobotContainer {
         final double vx = radialSpeed * ux + tangentialSpeed * (-uy);
         final double vy = radialSpeed * uy + tangentialSpeed * ux;
 
-        SmartDashboard.putNumber("3D Target Range Err (m)", rangeError);
-        SmartDashboard.putNumber("3D Target Radial Spd", radialSpeed);
-        SmartDashboard.putBoolean("3D Target In Range",
-            Math.abs(rangeError) <= kRangeDistDeadbandMeters);
-
         return new double[]{vx, vy};
     }
 
@@ -666,10 +919,17 @@ public class RobotContainer {
     }
 
     private boolean isFeederRequested() {
-        return isInputFromOperator(
+        boolean manual = isInputFromOperator(
             driverController.rightBumper().getAsBoolean(),
             isOperatorConnected() && operatorController.rightBumper().getAsBoolean()
         );
+        boolean autoFeed = isAimToHubRequested()
+            && isShooterRequested()
+            && isShooterAtSpeed()
+            && isHubActive()
+            && isSafeForAutoFunctions()
+            && isVisionAimConfirmed();
+        return manual || autoFeed;
     }
 
     private boolean isFeederReverseRequested() {
@@ -732,6 +992,27 @@ public class RobotContainer {
         return DriverStation.isJoystickConnected(1);
     }
 
+    private boolean isAllianceKnown() {
+        return DriverStation.getAlliance().isPresent();
+    }
+
+    private boolean isVisionFresh() {
+        if (!hadVisionPose) return false;
+        return (Timer.getFPGATimestamp() - lastVisionTagTimeSec) < kVisionFreshnessTimeoutSec;
+    }
+
+    private boolean isPoseOnField() {
+        final Pose2d pose = drivetrain.getState().Pose;
+        return pose.getX() > -kFieldMarginMeters
+            && pose.getX() < kFieldLengthMeters + kFieldMarginMeters
+            && pose.getY() > -kFieldMarginMeters
+            && pose.getY() < kFieldWidthMeters + kFieldMarginMeters;
+    }
+
+    private boolean isSafeForAutoFunctions() {
+        return isAllianceKnown() && isVisionFresh() && isPoseOnField();
+    }
+
     private void updateVisionPose() {
         // MegaTag2 pose estimation is handled by CommandSwerveDrivetrain.periodic().
         // Here we just read the fused pose from the drivetrain to compute hub distance.
@@ -742,6 +1023,7 @@ public class RobotContainer {
             LimelightHelpers.getBotPoseEstimate_wpiBlue_MegaTag2(kLimelightTableName);
         if (mt2 != null && mt2.tagCount > 0) {
             hadVisionPose = true;
+            lastVisionTagTimeSec = Timer.getFPGATimestamp();
         }
 
         final Pose2d fusedPose = drivetrain.getState().Pose;
@@ -750,13 +1032,6 @@ public class RobotContainer {
 
         field2d.setRobotPose(fusedPose);
         field2d.getObject("Hub").setPose(new Pose2d(hubPos, new Rotation2d()));
-
-        final double aimErrorDeg = computeAimErrorDeg();
-        SmartDashboard.putNumber("Hub Distance (m)", lastDistanceToHubMeters);
-        SmartDashboard.putNumber("Auto Shooter %", computeDistanceBasedShooterOutput() * 100.0);
-        SmartDashboard.putNumber("Aim Error (deg)", aimErrorDeg);
-        SmartDashboard.putBoolean("Aimed", Math.abs(aimErrorDeg) < kAimToHubDeadbandDeg);
-        SmartDashboard.putBoolean("Vision Valid", hadVisionPose);
 
         maybeLogVisionPose(fusedPose);
     }
@@ -810,8 +1085,8 @@ public class RobotContainer {
     }
 
     private double computeAimToHubTurnRate() {
-        if (!hadVisionPose) {
-            DriverStation.reportWarning("[AIM] No vision data yet, aim-to-hub disabled", false);
+        if (!isVisionFresh()) {
+            DriverStation.reportWarning("[AIM] Vision stale or never seen, aim-to-hub disabled", false);
             return 0.0;
         }
 
@@ -893,6 +1168,235 @@ public class RobotContainer {
             return !oddShift;
         } else {
             return oddShift;
+        }
+    }
+
+    // ── Smart Cycle Detection ──
+
+    private boolean isHopperLikelyEmpty() {
+        if (Math.abs(feederMotor.getOutputCurrent()) > kFeederEmptyCurrentAmps) {
+            feederLowCurrentStartSec = -1.0;
+            return false;
+        }
+        if (feederLowCurrentStartSec < 0) {
+            feederLowCurrentStartSec = Timer.getFPGATimestamp();
+        }
+        return (Timer.getFPGATimestamp() - feederLowCurrentStartSec) >= kFeederEmptyConfirmSec;
+    }
+
+    private boolean isCollectionDone() {
+        if (Math.abs(intakeMotor.getOutputCurrent()) > kIntakeIdleCurrentAmps) {
+            intakeIdleStartSec = -1.0;
+            return false;
+        }
+        if (intakeIdleStartSec < 0) {
+            intakeIdleStartSec = Timer.getFPGATimestamp();
+        }
+        return (Timer.getFPGATimestamp() - intakeIdleStartSec) >= kIntakeIdleConfirmSec;
+    }
+
+    private boolean isVisionAimConfirmed() {
+        final double tv = limelightTable.getEntry("tv").getDouble(0.0);
+        if (tv >= 1.0 && isTrackedTagHubTag()) {
+            return Math.abs(limelightTable.getEntry("tx").getDouble(99.0)) < kAutoFeedAimThresholdDeg;
+        }
+        return Math.abs(computeAimErrorDeg()) < kAutoFeedAimThresholdDeg;
+    }
+
+    // ── Auto-Cycle: button-driven autonomous teleop ──
+
+    private Translation2d getAllianceDepotPosition() {
+        final Optional<Alliance> alliance = DriverStation.getAlliance();
+        if (alliance.isPresent() && alliance.get() == Alliance.Red) {
+            return kRedDepotPosition;
+        }
+        return kBlueDepotPosition;
+    }
+
+    private Pose2d computeDepotPose() {
+        final Translation2d depot = getAllianceDepotPosition();
+        final Translation2d hub = getAllianceHubPosition();
+        final double heading = Math.atan2(
+            hub.getY() - depot.getY(), hub.getX() - depot.getX());
+        return new Pose2d(depot, new Rotation2d(heading));
+    }
+
+    private Pose2d computeScoringPose() {
+        final Translation2d hub = getAllianceHubPosition();
+        final Translation2d depot = getAllianceDepotPosition();
+        final double dx = hub.getX() - depot.getX();
+        final double dy = hub.getY() - depot.getY();
+        final double dist = Math.hypot(dx, dy);
+        final double ux = dx / dist;
+        final double uy = dy / dist;
+        final double idealDist = SmartDashboard.getNumber(
+            "Tune/Ideal Distance (m)", kIdealShootingDistanceMeters);
+        return new Pose2d(
+            hub.getX() - ux * idealDist,
+            hub.getY() - uy * idealDist,
+            new Rotation2d(Math.atan2(uy, ux)));
+    }
+
+    private SwerveRequest computeAutoScoreDriveRequest() {
+        if (!isSafeForAutoFunctions() || lastDistanceToHubMeters <= 0) {
+            return brakeRequest;
+        }
+
+        // Vision-refined aiming: use Limelight tx directly when a hub tag is visible
+        // for sub-degree precision. Fall back to pose-based aim otherwise.
+        double rawTurnRate;
+        final double tv = limelightTable.getEntry("tv").getDouble(0.0);
+        if (tv >= 1.0 && isTrackedTagHubTag()) {
+            final double txRad = Math.toRadians(limelightTable.getEntry("tx").getDouble(0.0));
+            rawTurnRate = MathUtil.clamp(-kLimelightTurnKp * txRad,
+                -kLimelightMaxTurnRateRadPerSec, kLimelightMaxTurnRateRadPerSec);
+        } else {
+            rawTurnRate = computeAimToHubTurnRate();
+        }
+
+        final double turnRate = rotVelLimiter.calculate(rawTurnRate);
+        final double[] autoVel = computeAutoPositionVelocity();
+        final double xVel = xVelLimiter.calculate(autoVel[0]);
+        final double yVel = yVelLimiter.calculate(autoVel[1]);
+
+        if (Math.abs(xVel) < kIdleLinearSpeedThresholdMps
+            && Math.abs(yVel) < kIdleLinearSpeedThresholdMps
+            && Math.abs(turnRate) < kIdleTurnRateThresholdRadPerSec) {
+            xVelLimiter.reset(0);
+            yVelLimiter.reset(0);
+            rotVelLimiter.reset(0);
+            return brakeRequest;
+        }
+        return drive.withVelocityX(xVel).withVelocityY(yVel)
+            .withRotationalRate(turnRate);
+    }
+
+    private boolean hasManualDriveInput() {
+        boolean driver = Math.abs(driverController.getLeftX()) > kManualOverrideThreshold
+            || Math.abs(driverController.getLeftY()) > kManualOverrideThreshold
+            || Math.abs(driverController.getRightX()) > kManualOverrideThreshold;
+        boolean operator = isOperatorConnected()
+            && (Math.abs(operatorController.getLeftX()) > kManualOverrideThreshold
+                || Math.abs(operatorController.getLeftY()) > kManualOverrideThreshold
+                || Math.abs(operatorController.getRightX()) > kManualOverrideThreshold);
+        return driver || operator;
+    }
+
+    private Command createAutoCycleCommand() {
+        return Commands.either(
+            Commands.either(
+                Commands.sequence(
+                    Commands.runOnce(() -> {
+                        autoCycleActive = true;
+                        DriverStation.reportWarning("[AUTO-CYCLE] Started", false);
+                    }),
+                    Commands.sequence(
+                        // ── COLLECT PHASE ──
+                        // Drive to depot with intake running, collecting balls on the way
+                        Commands.runOnce(() -> {
+                            intakeIdleStartSec = -1.0;
+                            collectPhaseStartSec = Timer.getFPGATimestamp();
+                            DriverStation.reportWarning("[AUTO-CYCLE] Collecting fuel", false);
+                        }),
+                        Commands.defer(() -> Commands.deadline(
+                            AutoBuilder.pathfindToPose(computeDepotPose(), pathfindConstraints),
+                            Commands.run(() -> intakeMotor.set(kIntakePercentOutput))
+                        ), Set.of(drivetrain)),
+                        // Smart collect: stop when intake current drops (no more balls)
+                        // or max timeout as fallback
+                        Commands.run(() -> intakeMotor.set(kIntakePercentOutput))
+                            .until(() -> {
+                                double elapsed = Timer.getFPGATimestamp() - collectPhaseStartSec;
+                                return elapsed >= kMinCollectSec && isCollectionDone();
+                            })
+                            .withTimeout(kAutoIntakeMaxSec),
+                        Commands.runOnce(() -> intakeMotor.set(0)),
+
+                        // ── SCORE PHASE ──
+                        // Drive to hub while pre-spinning the shooter (saves ~2s per cycle)
+                        Commands.runOnce(() -> {
+                            feederLowCurrentStartSec = -1.0;
+                            scoringPhaseStartSec = Timer.getFPGATimestamp();
+                            DriverStation.reportWarning("[AUTO-CYCLE] Driving to score", false);
+                        }),
+                        Commands.defer(() -> Commands.deadline(
+                            AutoBuilder.pathfindToPose(computeScoringPose(), pathfindConstraints),
+                            Commands.run(() -> {
+                                updateShooterOutput(computeDistanceBasedShooterOutput());
+                                updateVisionPose();
+                            })
+                        ), Set.of(drivetrain)),
+                        // Vision-refined scoring: aim with Limelight tx, feed only when
+                        // camera CONFIRMS aim, stop when hopper is empty (current-based)
+                        Commands.runOnce(() ->
+                            DriverStation.reportWarning("[AUTO-CYCLE] Scoring", false)),
+                        drivetrain.run(() -> {
+                            drivetrain.setControl(computeAutoScoreDriveRequest());
+                            updateShooterOutput(computeDistanceBasedShooterOutput());
+                            updateVisionPose();
+                            boolean ready = isShooterAtSpeed() && isHubActive()
+                                && isSafeForAutoFunctions()
+                                && isVisionAimConfirmed();
+                            feederMotor.set(ready ? kFeederPercentOutput : 0);
+                        }).until(() -> {
+                            double elapsed = Timer.getFPGATimestamp() - scoringPhaseStartSec;
+                            return elapsed >= kMinScoringSec && isHopperLikelyEmpty();
+                        }).withTimeout(kAutoScoreMaxSec),
+                        Commands.runOnce(() -> {
+                            feederMotor.set(0);
+                            updateShooterOutput(0);
+                        })
+                    ).repeatedly()
+                ).finallyDo(() -> {
+                    autoCycleActive = false;
+                    feederMotor.set(0);
+                    intakeMotor.set(0);
+                    updateShooterOutput(0);
+                    DriverStation.reportWarning("[AUTO-CYCLE] Stopped", false);
+                }).withTimeout(kAutoCycleTimeoutSec),
+                Commands.runOnce(() -> DriverStation.reportError(
+                    "[AUTO-CYCLE] BLOCKED: alliance unknown, vision stale, or pose off-field", false)),
+                this::isSafeForAutoFunctions
+            ),
+            Commands.runOnce(() -> DriverStation.reportError(
+                "[AUTO-CYCLE] Cannot start: PathPlanner not configured", false)),
+            drivetrain::isAutoBuilderConfigured
+        );
+    }
+
+    private double getSecondsUntilNextShiftChange() {
+        if (DriverStation.isAutonomous()) return -1.0;
+        final double matchTime = DriverStation.getMatchTime();
+        if (matchTime <= 0) return -1.0;
+        if (matchTime <= 30.0) return -1.0;
+        if (matchTime > 130.0) return matchTime - 130.0;
+        double timeIntoShifts = 130.0 - matchTime;
+        double progressInCurrentShift = timeIntoShifts % 25.0;
+        return 25.0 - progressInCurrentShift;
+    }
+
+    private void updateShiftAwareTelemetry() {
+        final double nowSec = Timer.getFPGATimestamp();
+        final double dt = (lastShiftUpdateSec > 0) ? (nowSec - lastShiftUpdateSec) : 0.0;
+        lastShiftUpdateSec = nowSec;
+
+        final boolean hubActive = isHubActive();
+        final double secUntilChange = getSecondsUntilNextShiftChange();
+
+        boolean shouldRumble = !hubActive
+            && secUntilChange >= 0
+            && secUntilChange <= kRumblePreActiveSec;
+        driverController.getHID().setRumble(
+            GenericHID.RumbleType.kBothRumble, shouldRumble ? kRumbleIntensity : 0.0);
+        if (isOperatorConnected()) {
+            operatorController.getHID().setRumble(
+                GenericHID.RumbleType.kBothRumble, shouldRumble ? kRumbleIntensity : 0.0);
+        }
+
+        boolean scoring = isFeederRequested() && isShooterAtSpeed() && hubActive;
+        if (scoring && dt > 0) {
+            fuelAccumulator += kEstimatedFuelPerSec * dt;
+            estimatedFuelScored = (int) fuelAccumulator;
         }
     }
 
