@@ -21,6 +21,7 @@ import com.revrobotics.spark.SparkMax;
 import edu.wpi.first.cameraserver.CameraServer;
 import edu.wpi.first.cscore.HttpCamera;
 import edu.wpi.first.cscore.HttpCamera.HttpCameraKind;
+import edu.wpi.first.cscore.VideoSource;
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.math.filter.SlewRateLimiter;
 import edu.wpi.first.math.geometry.Pose2d;
@@ -205,6 +206,7 @@ public class RobotContainer {
     private double collectPhaseStartSec = -1.0;
 
     private final Field2d field2d = new Field2d();
+    private VideoSource limelightCamera;
 
     public final CommandSwerveDrivetrain drivetrain = TunerConstants.createDrivetrain();
 
@@ -405,6 +407,13 @@ public class RobotContainer {
         robot.addNumber("Match Time", DriverStation::getMatchTime)
             .withSize(2, 1).withPosition(4, 3);
 
+        // ── VISION TAB ── Limelight camera feed
+        ShuffleboardTab vision = Shuffleboard.getTab("Vision");
+        vision.add("limelight-back", limelightCamera)
+            .withWidget(BuiltInWidgets.kCameraStream)
+            .withSize(6, 4)
+            .withPosition(0, 0);
+
         Shuffleboard.selectTab("Match");
     }
 
@@ -424,12 +433,12 @@ public class RobotContainer {
     }
 
     private void configureLimelightStream() {
-        HttpCamera limelightFeed = new HttpCamera(
+        limelightCamera = new HttpCamera(
             kLimelightTableName,
             "http://" + kLimelightTableName + ".local:5800/stream.mjpeg",
             HttpCameraKind.kMJPGStreamer
         );
-        CameraServer.addCamera(limelightFeed);
+        CameraServer.addCamera(limelightCamera);
         // Forward Limelight ports so the stream is reachable through the roboRIO over FMS.
         LimelightHelpers.setupPortForwardingUSB(0);
     }
