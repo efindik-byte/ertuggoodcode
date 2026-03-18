@@ -76,6 +76,7 @@ public class RobotContainer {
     private static final double kIntakeStallCurrentAmps = 40.0;    // intake roller stall protection
     private static final double kIntakeDiagPeriodSec = 1.0;
     private static final String kLimelightTableName = "limelight-back";
+    private static final String kLimelightStreamUrlDefault = "http://limelight-back.local:5800/stream.mjpeg";
     private static final double kLimelightTurnKp = 2.0; // rad/s per rad of tx error
     private static final double kLimelightMaxTurnRateRadPerSec = 1.5;
     private static final double kLimelightTxDeadbandDeg = 1.0;
@@ -232,12 +233,14 @@ public class RobotContainer {
         SmartDashboard.putNumber("Tune/Aim Kp", kAimToHubKp);
         SmartDashboard.putNumber("Tune/Range Kp", kRangeKp);
 
+        SmartDashboard.putString("Limelight Stream URL", kLimelightStreamUrlDefault);
+
         SmartDashboard.putString("Tune/Step 1 - First Boot",
             "Power on robot. Open SmartDashboard or Shuffleboard. "
             + "Check that 'Vision Valid' shows TRUE (Limelight sees AprilTags). "
             + "Check that 'Hub Distance (m)' shows a reasonable number. "
-            + "If Vision Valid stays FALSE: check Limelight is on, pipeline is set to AprilTag mode, "
-            + "and camera offsets are configured in http://limelight-back.local:5801");
+            + "and camera offsets are configured in http://limelight-back.local:5801. "
+            + "If Vision feed is blank: set 'Limelight Stream URL' to http://10.0.0.1:5800/stream.mjpeg (or Limelight's IP), restart robot.");
 
         SmartDashboard.putString("Tune/Step 2 - Test Auto-Aim",
             "Face the robot toward the hub. Hold Y button. "
@@ -433,14 +436,15 @@ public class RobotContainer {
     }
 
     private void configureLimelightStream() {
+        String streamUrl = SmartDashboard.getString("Limelight Stream URL", kLimelightStreamUrlDefault);
         limelightCamera = new HttpCamera(
             kLimelightTableName,
-            "http://" + kLimelightTableName + ".local:5800/stream.mjpeg",
+            streamUrl,
             HttpCameraKind.kMJPGStreamer
         );
         CameraServer.addCamera(limelightCamera);
-        // Forward Limelight ports so the stream is reachable through the roboRIO over FMS.
         LimelightHelpers.setupPortForwardingUSB(0);
+        DriverStation.reportWarning("[LIMELIGHT] Stream URL: " + streamUrl, false);
     }
 
     private void configureBindings() {
